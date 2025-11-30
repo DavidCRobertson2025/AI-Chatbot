@@ -42,6 +42,15 @@ VOICE_NAME = "echo"
 #  AUDIO DEVICE CONFIGURATION
 # ================================================================
 
+IDLE_PHRASES = [
+    "Ready when you are.",
+    "Anything I can help with?",
+    "I'm here whenever you need me.",
+    "Just say the word.",
+    "How can I help?",
+]
+
+
 def find_audio_devices():
     p = pyaudio.PyAudio()
     input_index = None
@@ -438,6 +447,58 @@ def eyes_idle_loop():
             time.sleep(random.uniform(1, 3))
 
 
+def led_blink_loop():
+    global is_running, is_thinking, is_speaking, listen_led, is_armed
+
+    while is_running:
+        # LED OFF if switch is off
+        if not is_armed:
+            listen_led.value = False
+            time.sleep(0.1)
+            continue
+
+        # Blink if BUSY (thinking OR speaking)
+        if is_thinking or is_speaking:
+            listen_led.value = True
+            time.sleep(0.3)
+            listen_led.value = False
+            time.sleep(0.3)
+            continue
+
+        # Otherwise READY → solid ON
+        listen_led.value = True
+        time.sleep(0.1)
+
+
+def idle_speech_loop():
+    global is_running, is_speaking, is_thinking, is_armed
+
+    last_spoke_time = time.time()
+    IDLE_INTERVAL = 90   # seconds of silence before it talks (adjust here)
+
+    while is_running:
+        time.sleep(1)
+
+        # Do NOT speak while the bot is:
+        # - Sleeping (switch off)
+        # - Thinking
+        # - Speaking
+        if not is_armed:
+            last_spoke_time = time.time()
+            continue
+
+        if is_thinking or is_speaking:
+            last_spoke_time = time.time()
+            continue
+
+        # If too much quiet time passes, say an idle phrase
+        if time.time() - last_spoke_time > IDLE_INTERVAL:
+            phrase = random.choice(IDLE_PHRASES)
+            print(f"[Idle message] {phrase}")
+            speak_text(phrase, color=(0, 255, 0))
+            last_spoke_time = time.time()
+
+
 def center_eyes():
     """Move eyes and eyelids to neutral center positions."""
     neutral_x = (X_LIMITS[0] + X_LIMITS[1]) // 2
@@ -557,7 +618,7 @@ def transcribe_audio(filename):
 # ================================================================
 
 
-def record_audio(filename="input.wav", threshold=1800, silence_duration=0.6):
+def record_audio(filename="input.wav", threshold=2400, silence_duration=0.6):
     """
     Voice-activated audio recorder:
       - Starts when RMS > threshold
@@ -750,8 +811,19 @@ def speak_text(text, color=(0, 0, 255)):
 # ================================================================
 
 def update_listen_led_state():
-    # Button uses pull-up: LOW (False) means ON
-    listen_led.value = (not listen_button.value)
+    """
+    LED logic:
+    - OFF if switch off
+    - BLINKING handled by led_blink_loop when busy
+    - SOLID ON when armed & ready
+    """
+    global listen_led, is_armed, is_thinking, is_speaking
+
+    if not is_armed:
+        listen_led.value = False
+    elif not (is_thinking or is_speaking):
+        # Ready state
+        listen_led.value = True
 
 
 def main():
@@ -773,6 +845,12 @@ def main():
     # Start the eye idle thread in all cases
     eye_thread = threading.Thread(target=eyes_idle_loop)
     eye_thread.start()
+
+    led_thread = threading.Thread(target=led_blink_loop)
+    led_thread.start()
+
+    idle_thread = threading.Thread(target=idle_speech_loop)
+    idle_thread.start()
 
     # ▶️ Startup announcement
     speak_text("I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
