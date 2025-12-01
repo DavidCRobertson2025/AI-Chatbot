@@ -106,7 +106,7 @@ DIR_RIGHT_BLINK = -1
 # Blink configuration
 BLINK_OPEN_LEFT = -12
 BLINK_OPEN_RIGHT = 0
-BLINK_SIDE_DELAY = 0.03
+BLINK_SIDE_DELAY = 0.07
 
 MOVE_STEP = 1
 MOVE_DELAY = 0.01
@@ -642,6 +642,49 @@ def transcribe_audio(filename):
         return ""
 
 
+def is_meaningful_text(text: str) -> bool:
+    """
+    Heuristic filter to ignore background noise / nonsense.
+    Returns False for very short, low-information, or non-speechy strings.
+    Allows specific short commands like 'stop', 'exit', 'quit'.
+    """
+    if not text:
+        return False
+
+    t = text.strip().lower()
+
+    # Always allow these short commands
+    ALWAYS_ALLOW = {"stop", "exit", "quit"}
+    if t in ALWAYS_ALLOW:
+        return True
+
+    # Too short overall (e.g., "uh", "ok")
+    if len(t) < 5:
+        return False
+
+    # Very few alphabetic characters (mostly symbols / numbers)
+    letters = sum(1 for c in t if c.isalpha())
+    non_space = sum(1 for c in t if not c.isspace())
+    if non_space > 0 and letters / non_space < 0.5:
+        return False
+
+    # Require at least 2 words with some vowels
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) < 2:
+        return False
+
+    if not any(ch in "aeiou" for ch in t):
+        return False
+
+    # Add any specific junk patterns Whisper often produces in your room:
+    NOISE_PATTERNS = {"uh", "umm", "mm", "hmm"}
+    if t in NOISE_PATTERNS:
+        return False
+
+    return True
+
+
+
 # ================================================================
 #  SPEECH SYNTHESIS + MOUTH MOVEMENT
 # ================================================================
@@ -870,7 +913,7 @@ def main():
         # Optional: small delay so you can see logs if run manually as a service
         time.sleep(1)
 
-    # Start the eye idle thread in all cases
+    # Start background threads
     eye_thread = threading.Thread(target=eyes_idle_loop)
     eye_thread.start()
 
@@ -902,14 +945,17 @@ def main():
                     set_eyelids_closed()  # going to sleep
                 last_armed = button_on
 
+            # Update LED based on current state
             update_listen_led_state()
 
+            # If switch is OFF: don't listen, just idle/sleep
             if not button_on:
-                # Switch OFF: don't listen, just idle/sleep
+                is_thinking = False
                 time.sleep(0.05)
                 continue
 
             # Switch is ON: listen once
+            print("🎤 Listening for speech...")
             audio_path = record_audio()
 
             # If recording was cancelled (button turned off or no audio), skip this turn
@@ -924,7 +970,7 @@ def main():
 
             os.remove(audio_path)
 
-            # if nothing was transcribed, skip asking the model
+            # 1️⃣ Completely empty / whitespace → ignore
             if not user_text or not user_text.strip():
                 print("⚠️ Nothing clear was transcribed; not sending to OpenAI.")
                 is_thinking = False
@@ -933,9 +979,15 @@ def main():
 
             norm = user_text.lower().strip()
 
-            # ----------------------------------------------
-            # Easter eggs
-            # ----------------------------------------------
+            # 2️⃣ Exit commands (must work even if short)
+            if norm in ["quit", "exit", "stop"]:
+                is_running = False
+                pca.deinit()
+                clear_mouth()
+                print("👋 Goodbye.")
+                break
+
+            # 3️⃣ Easter eggs (also allowed even if short-ish)
             if "wink for me" in norm or norm.startswith("wink") or "can you wink" in norm:
                 is_thinking = False
                 print("✨ Easter Egg: wink")
@@ -948,15 +1000,12 @@ def main():
                 blink_twice()
                 continue
 
-            # ----------------------------------------------
-            # Exit commands
-            # ----------------------------------------------
-            if norm in ["quit", "exit", "stop"]:
-                is_running = False
-                pca.deinit()
-                clear_mouth()
-                print("👋 Goodbye.")
-                break
+            # 4️⃣ Noise filter – ignore junk / room noise
+            if not is_meaningful_text(user_text):
+                print("⚠️ Transcription looks like noise; ignoring.")
+                is_thinking = False
+                time.sleep(0.5)
+                continue
 
             # ----------------------------------------------
             # Normal conversation
@@ -993,6 +1042,9 @@ def main():
                 is_thinking = False
                 continue  # skip this turn and go back to waiting for the next question
 
+            # ----------------------------------------------
+            # Handle model response + emotion
+            # ----------------------------------------------
             full_reply = response.choices[0].message.content.strip()
 
             # Extract emotion
